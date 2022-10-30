@@ -1,0 +1,236 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  My sample. HTTP API(IAM Auth and Lambda backend) and Cognito for SPA.
+
+Parameters:
+  CallbackURL:
+    Type: String
+    Default: http://localhost:3000
+
+Resources:
+
+  SampleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-SampleFunction'
+      CodeUri: sample/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      MemorySize: 128
+      Timeout: 15
+      Role: !GetAtt SampleFunctionRole.Arn
+      Architectures:
+        - x86_64
+
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt SampleFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/*"
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${AWS::StackName}-userpool
+      UsernameAttributes:
+        - email
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Schema:
+        - Name: email
+          Required: true
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub ${AWS::StackName}-${AWS::AccountId}
+      UserPoolId: !Ref UserPool
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub ${AWS::StackName}-client
+      SupportedIdentityProviders:
+        - COGNITO
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      GenerateSecret: false
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      CallbackURLs:
+        - !Ref CallbackURL
+      LogoutURLs:
+        - !Ref CallbackURL
+
+  IdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      AllowUnauthenticatedIdentities: true
+      IdentityPoolName: !Sub ${AWS::StackName}-identitypool
+      CognitoIdentityProviders:
+        - ClientId: !Ref UserPoolClient
+          ProviderName: !GetAtt UserPool.ProviderName
+
+  IdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        unauthenticated: !GetAtt CognitoUnauthRole.Arn
+        authenticated: !GetAtt CognitoAuthedRole.Arn
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ${AWS::StackName}-api
+      ProtocolType: HTTP
+      # CORS Settings refs https://docs.aws.amazon.com/ja_jp/apigateway/latest/developerguide/http-api-cors.html
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref CallbackURL
+        AllowCredentials: false
+        AllowHeaders:
+          - Content-Type
+          - X-Amz-Date
+          - X-Amz-Security-Token
+          - Authorization
+          - X-Api-Key'
+        AllowMethods:
+          - GET
+          - HEAD
+        MaxAge: 300
+
+  HttpApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /sample"
+      AuthorizationType: AWS_IAM
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  HttpApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      ConnectionType: INTERNET
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt SampleFunction.Arn
+      PayloadFormatVersion: 2.0
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      AutoDeploy: true
+      StageName: $default
+
+  SampleFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-SampleFunction-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+            Effect: 'Allow'
+            Principal:
+              Service:
+                - 'lambda.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  CognitoUnauthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-Cognito-Unauth-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Federated:
+                - 'cognito-identity.amazonaws.com'
+            Action:
+              - 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Ref IdentityPool
+              ForAnyValue:StringLike:
+                cognito-identity.amazonaws.com:amr: unauthenticated
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-Cognito-Unauth-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'DefaultOfAUnauthRole'
+                Effect: 'Allow'
+                Action:
+                  - 'mobileanalytics:PutEvents'
+                  - 'cognito-sync:*'
+                Resource: '*'
+
+  CognitoAuthedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-Cognito-Authed-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Federated:
+                - 'cognito-identity.amazonaws.com'
+            Action:
+              - 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Ref IdentityPool
+              ForAnyValue:StringLike:
+                cognito-identity.amazonaws.com:amr: authenticated
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-Cognito-Authed-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'DefaultOfAuthedRole'
+                Effect: 'Allow'
+                Action:
+                  - 'mobileanalytics:PutEvents'
+                  - 'cognito-sync:*'
+                  - 'cognito-identity:*'
+                Resource: '*'
+              - Sid: 'AllowInvokeApi'
+                Effect: 'Allow'
+                Action:
+                  - 'execute-api:Invoke'
+                Resource: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*"
+
+Outputs:
+  UserPoolId:
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub ${AWS::StackName}-UserPoolId
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub ${AWS::StackName}-UserPoolClientId
+  UserPoolDomain:
+    Value: !Ref UserPoolDomain
+    Export:
+      Name: !Sub ${AWS::StackName}-UserPoolDomain
+  IdentityPoolId:
+    Value: !Ref IdentityPool
+    Export:
+      Name: !Sub ${AWS::StackName}-IdentityPool
+  HttpApiEndpoint:
+    Value: !GetAtt HttpApi.ApiEndpoint
+    Export:
+      Name: !Sub ${AWS::StackName}-HttpApiEndpoint

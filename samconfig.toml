@@ -1,0 +1,11 @@
+version = 0.1
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "demo-api-with-cog"
+region = "us-east-1"
+capabilities = "CAPABILITY_NAMED_IAM"
+# parameter_overrides = ""
+# s3_bucket = "tmp-us-east-1-xxxxxxxxx"
+# s3_prefix = "tmp"
+# image_repositories = []
